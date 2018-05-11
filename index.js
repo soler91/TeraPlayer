@@ -19,27 +19,58 @@ module.exports = function TeraPlayer(dispatch)
   let PlaybackStarted = 0;
   let Ticks = 0;
   let LastEvent = 0;
+  let WaitingStarted = 0;
 
   const ST_REC = 'recording';
   const ST_PLAY = 'playing';
   const ST_STOP = 'stopping';
   const ST_PAUSE = 'paused';
   const ST_LOAD = 'loading';
-/*
- rec %name% - start recording
- play %name% - start playing
- play - resume paused play
- pause - pause a play
- clear - clear world cache
- stop - stop recording or playing
- save - save recording
-*/
-  cmd.add('player', (arg1, arg2, arg3) =>
+  const ST_WAIT_USER = 'waiting user';
+  const ST_WAIT_CLIENT = 'waiting client';
+
+  const BASIC_REC_HOOKS =  [['S_BOSS_GAGE_INFO', 3],
+                            ['S_CREATURE_CHANGE_HP', 6],
+                            ['S_CREATURE_ROTATE', 2],
+                            ['S_CREATURE_LIFE', 2],
+                            ['S_ITEM_EXPLOSION_RESULT', 1],
+                            ['S_ABNORMALITY_BEGIN', 2],
+                            ['S_ABNORMALITY_END', 1],
+                            ['S_ABNORMALITY_FAIL', 1],
+                            ['S_ABNORMALITY_REFRESH', 1],
+                            ['S_ABNORMALITY_RESIST', 1],
+                            ['S_SYSTEM_MESSAGE', 1],
+                            ['S_SPAWN_PROJECTILE', 3],
+                            ['S_DESPAWN_PROJECTILE', 2],
+                            ['S_START_USER_PROJECTILE', 5],
+                            ['S_END_USER_PROJECTILE', 3],
+                            ['S_CREST_MESSAGE', 3],
+                            ['S_USER_MOVETYPE', 1],
+                            ['S_USER_LOCATION_IN_ACTION', 2],
+                            ['S_USER_FLYING_LOCATION', 2],
+                            ['S_USER_STATUS', 1],
+                            ['S_ACTION_STAGE', 1],
+                            ['S_ACTION_END', 1],
+                            ['S_USER_SITUATION', 1],
+                            ['S_USER_WEAPON_APPEARANCE_CHANGE', 1],
+                            ['S_USER_EFFECT', 1],
+                            ['S_USER_APPEARANCE_CHANGE', 1],
+                            ['C_PLAYER_FLYING_LOCATION', 4]];
+
+  const LOCK_SKILL_HOOKS = [['C_START_SKILL', 2],
+                            ['C_START_INSTANCE_SKILL', 3],
+                            ['C_START_INSTANCE_SKILL_EX', 3],
+                            ['C_START_TARGETED_SKILL', 4],
+                            ['C_START_COMBO_INSTANT_SKILL', 2],
+                            ['C_PRESS_SKILL', 2],
+                            ['C_NOTIMELINE_SKILL', 1]];
+
+  cmd.add('vhs', (arg1, arg2, arg3) =>
   {
     if (arg1 == 'rec')
     {
       //////////////////
-      // Record
+      // REC
       //////////////////
       if (Recording)
       {
@@ -69,9 +100,11 @@ module.exports = function TeraPlayer(dispatch)
       }
       else
       {
-        if (State == ST_PAUSE)
+        if (State == ST_PAUSE || State == ST_WAIT_USER)
         {
-          cmd.message(`Resuming`);
+          cmd.message(`Resuming...`);
+          PlaybackStarted += Date.now() - WaitingStarted;
+          WaitingStarted = 0;
           State = ST_PLAY;
           Tick();
           return;
@@ -143,7 +176,10 @@ module.exports = function TeraPlayer(dispatch)
     }
     else
     {
-      cmd.message('Supported commands:');
+      //////////////////
+      // INFO
+      //////////////////
+      cmd.message('VHS commands:');
       cmd.message('  play MyRecord - plays a record with name MyRecord');
       cmd.message('  play - resumes play after pause');
       cmd.message('  pause - pauses current tape');
@@ -159,6 +195,47 @@ module.exports = function TeraPlayer(dispatch)
   {
     return cfg.tapeStorage + name + ".tape";
   }
+
+  for (let packet of BASIC_REC_HOOKS)
+  {
+    try ()
+    {
+      dispatch.hook(...packet, BasicRecordHook.bind(null, ...packet));
+    }
+    catch(e)
+    {
+      console.log(`Failed to bind ${packet[0]}`);
+    }
+  }
+
+  for (let packet of LOCK_SKILL_HOOKS)
+  {
+    try ()
+    {
+      dispatch.hook(...packet, LockSkillHook.bind(null, ...packet));
+    }
+    catch(e)
+    {
+      console.log(`Failed to bind ${packet[0]}`);
+    }
+  }
+
+  function BasicRecordHook()
+  {
+    if (me.locked) return false;
+    if (Recording) RecordEvent(opcode, version, event);
+    return true;
+  }
+
+  function LockSkillHook()
+  {
+    if (me.locked)
+    {
+      SendCantStartSkill(event.skill);
+      return false;
+    } 
+  }
+
   function StartRecording()
   {
     me.tape.start = Date.now();
@@ -168,6 +245,7 @@ module.exports = function TeraPlayer(dispatch)
     me.tape.world = me.world;
     me.tape.startPos = me.pos;
     me.tape.startAngle = me.angle;
+    me.tape.login = me.login;
     State = ST_REC;
     Recording = true;
     cmd.message('Recording...');
@@ -245,11 +323,21 @@ module.exports = function TeraPlayer(dispatch)
       setTimeout(StartPlaying, cfg.startDelay);
       return false
     }
+    else if (State == ST_REC)
+    {
+      RecordEvent('C_LOAD_TOPO_FIN', 1, event);
+    }
+    else if (State == ST_WAIT_CLIENT)
+    {
+      State = ST_PLAY;
+      Tick();
+    }
     return true;
   }
 
   function Pause()
   {
+    WaitingStarted = Date.now();
     State = ST_PAUSE;
   }
 
@@ -266,6 +354,7 @@ module.exports = function TeraPlayer(dispatch)
       else 
       {
         me.tape = JSON.parse(data);
+        me.tape.fakeId = {low : 11111111, high : me.id.high};
         setTimeout(OnTapeLoaded, 100);
       }
     });
@@ -313,6 +402,8 @@ module.exports = function TeraPlayer(dispatch)
   {
     me.tape.data = [];
     me.tape.world = null;
+    me.tape.login = null;
+    me.tape.startPos = null;
   }
 
   function ReturnClientToWorld()
@@ -361,6 +452,7 @@ module.exports = function TeraPlayer(dispatch)
     me.world.pcs = [];
     me.world.wobjs = [];
     me.world.colls = [];
+    me.world.aero = null;
   }
 
   function Tick()
@@ -372,6 +464,7 @@ module.exports = function TeraPlayer(dispatch)
 
       let events = [];
       let cnt = me.tape.data.length;
+      let loadTopo = false;
       // Get all events for the current frame
       for (; LastEvent < cnt; ++LastEvent)
       {
@@ -382,11 +475,36 @@ module.exports = function TeraPlayer(dispatch)
         events.push(me.tape.data[LastEvent]);
       }
 
-      // Dispatch to client
+      // Send to client
       cnt = events.length;
+      loadTopo = false;
       for (let i = 0; i < cnt; ++i)
       {
-        ProcessFrame(events[i], currentTickTime);
+        if (events[i].opcode == 'S_LOAD_TOPO')
+        {
+          if (!cfg.autoTeleport)
+          {
+            Ticks++;
+            State = ST_WAIT_USER;
+            WaitingStarted = Date.now();
+            LastEvent -= cnt - i; // We won't execute next events so fix LastEvent to process them later
+            cmd.message('You reached the end of this location. Use command \'continue\' to resume playing.');
+            break;
+          }
+          else
+          {
+            loadTopo = true; // Execute all next frames asap in one shot
+          }
+        }
+        else if (event[i].opcode == 'C_LOAD_TOPO_FIN')
+        {
+          Ticks++;
+          State = ST_WAIT_USER;
+          WaitingStarted = Date.now();
+          LastEvent -= cnt - i - 1; // We won't execute next events now so fix LastEvent to process them later. And skip C_LOAD_TOPO_FIN.
+          break;
+        }
+        ExecuteFrame(events[i], loadTopo ? event.time : currentTickTime); // if loadTopo is set - we need to execute frames asap. So ignore event.time
       }
 
       let tickLag = Date.now() - PlaybackStarted - currentTickTime;
@@ -400,14 +518,131 @@ module.exports = function TeraPlayer(dispatch)
       }
       else
       {
-        cmd.message('Riched the end of tape!');
+        cmd.message('Reached the end of tape!');
       }
     }
   }
 
-  function ProcessFrame(event, tickTime)
+  function ExecuteFrame(event, tickTime)
   {
-    setTimeout(function(){dispatch.toClient(event.name, event.revision, event.packet);}, (event.time - tickTime) / PlaybackSpeed);
+    if (event.opcode == 'S_SPAWN_ME')
+    {
+      event.gameId = me.id;
+      event.alive = true;
+
+      if (cfg.showMe)
+      {
+        dispatch.toClient('S_SPAWN_USER', 13,
+        {
+          serverId : me.tape.login.serverId,
+          playerId : me.tape.login.playerId, // should fake?
+          gameId : me.tape.fakeId,
+          loc : event.loc,
+          w : event.w,
+          templateId : me.tape.login.templateId,
+          visible : true,
+          alive : event.alive,
+          appearance : me.tape.login.appearance,
+          weapon : me.tape.login.weapon,
+          body : me.tape.login.body,
+          hand : me.tape.login.hand,
+          feet : me.tape.login.feet,
+          underware : me.tape.login.underware,
+          head : me.tape.login.head,
+          face : me.tape.login.face,
+          spawnFx : 1,
+          mount : 0, //fixme
+          pose : 0,
+          title : title,
+          gm : cfg.gm,
+          weaponModel : me.tape.login.weaponModel,
+          bodyModel : me.tape.login.bodyModel,
+          handModel : me.tape.login.handModel,
+          feetModel : me.tape.login.feetModel,
+          bodyDye : me.tape.login.bodyDye,
+          handDye : me.tape.login.handDye,
+          feetDye : me.tape.login.feetDye,
+          weaponEnchant : me.tape.login.weaponEnchant,
+          newbie : me.tape.login.newbie,
+          pkEnabled : me.tape.login.infamy, // fixme ??
+          level : me.tape.login.level,
+          vehicleEx : 0, // fixme
+          showFace : me.tape.login.showFace,
+          styleHead : me.tape.login.styleHead,
+          styleFace : me.tape.login.styleFace,
+          styleBack : me.tape.login.styleBack,
+          styleWeapon : me.tape.login.styleWeapon,
+          styleBody : me.tape.login.styleBody,
+          styleFootprint : me.tape.login.styleFootprint,
+          showStyle : me.tape.login.showStyle,
+          appearance2 : me.tape.login.appearance2,
+          scale : me.tape.login.scale
+          name : me.tape.login.name,
+          details : me.tape.login.details,
+          shape : shape
+        });
+      }
+      setTimeout(function(){dispatch.toClient(event.opcode, event.revision, event.packet);}, (event.time - tickTime) / PlaybackSpeed);
+    }
+    else if (event.opcode == 'C_PLAYER_LOCATION')
+    {
+      if (cfg.showMe)
+      {
+        dispatch.toClient('S_USER_LOCATION', 4,
+        {
+          gameId : me.tape.fakeId,
+          loc : event.loc,
+          w : event.w,
+          LookDirection : event.lookDirection,
+          speed : me.tape.stats.runSpeed + me.tape.stats.runSpeedBonus, // Fixme
+          dest : event.dest,
+          type : event.type,
+          inShuttle : false,
+          time : Date.now()
+        });
+      }
+    }
+    else if (event.opcode.startsWith('C_'))
+    {
+      // Ignore all client packets
+      return;
+    }
+    else
+    {
+      if (event.gameId && event.gameId.equals(me.tape.id))
+      {
+        if (!cfg.showMe) return;
+        event.gameId = me.tape.fakeId;
+      }
+      if (event.target && event.target.equals(me.tape.id))
+      {
+        if (!cfg.showMe) return;
+        event.target = me.tape.fakeId;
+      }
+      if (event.source && event.source.equals(me.tape.id))
+      {
+        if (!cfg.showMe) return;
+        event.source = me.tape.fakeId;
+      }
+
+      if (event.speed)
+      {
+        event.speed /= PlaybackSpeed;
+      }
+      if (event.duration)
+      {
+        event.duration /= PlaybackSpeed;
+      }
+      if (event.movement)
+      {
+        for (let i = 0; i < event.movement.length; ++i)
+        {
+          event.movement[i].duration /= PlaybackSpeed;
+          event.movement[i].speed /= PlaybackSpeed;
+        }
+      }
+      setTimeout(function(){dispatch.toClient(event.opcode, event.revision, event.packet);}, (event.time - tickTime) / PlaybackSpeed);
+    }
   }
 
   dispatch.hook('S_LOGIN', 10, (event) =>
@@ -449,7 +684,7 @@ module.exports = function TeraPlayer(dispatch)
     });
   }
 
-  dispatch.hook('C_PLAYER_FLYING_LOCATION', 4, (event) => 
+  dispatch.hook('C_CANCEL_SKILL', (event) => 
   {
     if (me.locked)
     {
@@ -457,70 +692,7 @@ module.exports = function TeraPlayer(dispatch)
     }
   });
 
-  dispatch.hook('C_START_SKILL', 2, (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-  
-  dispatch.hook('C_START_INSTANCE_SKILL', (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-
-  dispatch.hook('C_START_INSTANCE_SKILL_EX', (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-
-  dispatch.hook('C_START_TARGETED_SKILL', (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-
-  dispatch.hook('C_START_COMBO_INSTANT_SKILL', (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-
-  dispatch.hook('C_PRESS_SKILL', (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-
-  dispatch.hook('C_NOTIMELINE_SKILL', (event) => 
-  {
-    if (me.locked)
-    {
-      SendCantStartSkill(event.skill);
-      return false;
-    }
-  });
-
-  dispatch.hook('C_CANCEL_SKILL', 1, (event) => 
+  dispatch.hook('C_USE_ITEM', (event) => 
   {
     if (me.locked)
     {
@@ -528,25 +700,7 @@ module.exports = function TeraPlayer(dispatch)
     }
   });
 
-  dispatch.hook('C_PLAYER_LOCATION', 3, (event) => 
-  {
-    me.pos = event.loc.addN(event.dest).scale(0.5);
-    me.angle = event.w;
-    if (me.locked)
-    {
-      return false;
-    }
-  });
-
-  dispatch.hook('C_USE_ITEM', 3, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-  });
-
-  dispatch.hook('C_ASK_INTERACTIVE', 2, (event) => 
+  dispatch.hook('C_ASK_INTERACTIVE', (event) => 
   {
     if (me.locked)
     {
@@ -555,6 +709,14 @@ module.exports = function TeraPlayer(dispatch)
   });
 
   dispatch.hook('S_EACH_SKILL_RESULT', (event) => 
+  {
+    if (me.locked)
+    {
+      return false;
+    }
+  });
+
+  dispatch.hook('C_HIT_USER_PROJECTILE', (event) => 
   {
     if (me.locked)
     {
@@ -577,195 +739,29 @@ module.exports = function TeraPlayer(dispatch)
     }
   });
 
-  dispatch.hook('C_HIT_USER_PROJECTILE', (event) => 
+  dispatch.hook('C_PLAYER_LOCATION', 5, (event) => 
   {
-    if (me.locked)
-    {
-      return false;
-    }
+    me.pos = event.loc.addN(event.dest).scale(0.5);
+    me.angle = event.w;
+    return BasicRecordHook('C_PLAYER_LOCATION', 5, event);
   });
 
   dispatch.hook('S_PLAYER_STAT_UPDATE', 9, (event) => 
   {
     me.stats = event;
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_PLAYER_STAT_UPDATE', 9, event);
-    }
-  });
-
-  dispatch.hook('S_BOSS_GAGE_INFO', 3, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_BOSS_GAGE_INFO', 9, event);
-    }
+    return BasicRecordHook('S_PLAYER_STAT_UPDATE', 9, event);
   });
 
   dispatch.hook('S_PARTY_MEMBER_LIST', 1, (event) => 
   {
     me.party = event;
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_PARTY_MEMBER_LIST', 1, event);
-    }
-  });
-
-  dispatch.hook('S_CREATURE_CHANGE_HP', 6, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_CREATURE_CHANGE_HP', 6, event);
-    }
-  });
-
-  dispatch.hook('S_CREATURE_ROTATE', 2, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_CREATURE_ROTATE', 2, event);
-    }
-  });
-
-  dispatch.hook('S_CREATURE_LIFE', 2, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_CREATURE_LIFE', 2, event);
-    }
-  });
-
-  dispatch.hook('S_ITEM_EXPLOSION_RESULT', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ITEM_EXPLOSION_RESULT', 1, event);
-    }
-  });
-
-  dispatch.hook('S_ABNORMALITY_BEGIN', 2, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ABNORMALITY_BEGIN', 2, event);
-    }
-  });
-
-  dispatch.hook('S_ABNORMALITY_END', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ABNORMALITY_END', 1, event);
-    }
-  });
-
-  dispatch.hook('S_ABNORMALITY_FAIL', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ABNORMALITY_FAIL', 1, event);
-    }
-  });
-
-  dispatch.hook('S_ABNORMALITY_REFRESH', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ABNORMALITY_REFRESH', 1, event);
-    }
-  });
-
-  dispatch.hook('S_ABNORMALITY_RESIST', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ABNORMALITY_RESIST', 1, event);
-    }
+    return BasicRecordHook('S_PARTY_MEMBER_LIST', 1, event);
   });
 
   dispatch.hook('S_SPAWN_ME', 2, (event) => 
   {
     me.pos = event.loc;
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SPAWN_ME', 2, event);
-    }
-  });
-
-  dispatch.hook('S_USER_APPEARANCE_CHANGE', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_APPEARANCE_CHANGE', 1, event);
-    }
-  });
-
-  dispatch.hook('S_SYSTEM_MESSAGE', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SYSTEM_MESSAGE', 1, event);
-    }
+    return BasicRecordHook('S_SPAWN_ME', 2, event);
   });
 
   dispatch.hook('S_USER_EXTERNAL_CHANGE', 6, (event) => 
@@ -793,21 +789,15 @@ module.exports = function TeraPlayer(dispatch)
         me.world.pcs[i].styleWeapon = event.styleWeapon;
         me.world.pcs[i].styleBody = event.styleBody;
         me.world.pcs[i].styleFootprint = event.styleFootprint;
-        me.world.pcs[i].bodyDie = event.bodyDie;
-        me.world.pcs[i].handDie = event.handDie;
-        me.world.pcs[i].feetDie = event.feetDie;
+        me.world.pcs[i].bodyDye = event.bodyDye;
+        me.world.pcs[i].handDye = event.handDye;
+        me.world.pcs[i].feetDye = event.feetDye;
         me.world.pcs[i].showStyle = event.showStyle;
         break;
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_EXTERNAL_CHANGE', 6, event);
-    }
+
+    return BasicRecordHook('S_USER_EXTERNAL_CHANGE', 6, event);
   });
 
   dispatch.hook('S_NPC_LOCATION', 3, (event) => 
@@ -820,75 +810,13 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_NPC_LOCATION', 3, event);
-    }
+    return BasicRecordHook('S_NPC_LOCATION', 3, event);
   });
 
   dispatch.hook('S_SPAWN_NPC', 7, (event) =>
   {
     me.world.npcs.push(event);
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SPAWN_NPC', 7, event);
-    }
-  });
-
-  dispatch.hook('S_SPAWN_PROJECTILE', 3, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SPAWN_PROJECTILE', 3, event);
-    }
-  });
-
-  dispatch.hook('S_DESPAWN_PROJECTILE', 2, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_DESPAWN_PROJECTILE', 2, event);
-    }
-  });
-
-  dispatch.hook('S_START_USER_PROJECTILE', 5, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_START_USER_PROJECTILE', 5, event);
-    }
-  });
-
-  dispatch.hook('S_END_USER_PROJECTILE', 3, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_END_USER_PROJECTILE', 3, event);
-    }
+    return BasicRecordHook('S_SPAWN_NPC', 7, event);
   });
 
   dispatch.hook('S_DESPAWN_NPC', 3, (event) =>
@@ -901,28 +829,13 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_DESPAWN_NPC', 3, event);
-    }
+    return BasicRecordHook('S_DESPAWN_NPC', 3, event);
   });
 
   dispatch.hook('S_SPAWN_COLLECTION', 4, (event) =>
   {
     me.world.colls.push(event);
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SPAWN_COLLECTION', 4, event);
-    }
+    return BasicRecordHook('S_SPAWN_COLLECTION', 4, event);
   });
 
   dispatch.hook('S_DESPAWN_COLLECTION', 2, (event) =>
@@ -935,28 +848,13 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_DESPAWN_COLLECTION', 2, event);
-    }
+    return BasicRecordHook('S_DESPAWN_COLLECTION', 2, event);
   });
 
   dispatch.hook('S_SPAWN_USER', 13, (event) =>
   {
     me.world.pcs.push(event);
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SPAWN_USER', 13, event);
-    }
+    return BasicRecordHook('S_SPAWN_USER', 13, event);
   });
 
   dispatch.hook('S_DESPAWN_USER', 3, (event) =>
@@ -969,28 +867,13 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_DESPAWN_USER', 3, event);
-    }
+    return BasicRecordHook('S_DESPAWN_USER', 3, event);
   });
 
   dispatch.hook('S_SPAWN_WORKOBJECT', 3, (event) =>
   {
     me.world.wobjs.push(event);
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_SPAWN_WORKOBJECT', 3, event);
-    }
+    return BasicRecordHook('S_SPAWN_WORKOBJECT', 3, event);
   });
 
   dispatch.hook('S_DESPAWN_WORKOBJECT', 2, (event) =>
@@ -1003,27 +886,7 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_DESPAWN_WORKOBJECT', 3, event);
-    }
-  });
-
-  dispatch.hook('S_CREST_MESSAGE', (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_CREST_MESSAGE', 3, event);
-    }
+    return BasicRecordHook('S_DESPAWN_WORKOBJECT', 2, event);
   });
 
   dispatch.hook('S_USER_LOCATION', 4, (event) =>
@@ -1037,123 +900,13 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_LOCATION', 4, event);
-    }
-  });
-
-  dispatch.hook('S_USER_MOVETYPE', 1, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_MOVETYPE', 1, event);
-    }
+    return BasicRecordHook('S_USER_LOCATION', 4, event);
   });
 
   dispatch.hook('S_LEAVE_PARTY', 3, (event) =>
   {
     me.party = null;
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_LEAVE_PARTY', 3, event);
-    }
-  });
-
-  dispatch.hook('S_USER_LOCATION_IN_ACTION', 2, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_LOCATION_IN_ACTION', 2, event);
-    }
-  });
-
-  dispatch.hook('S_USER_FLYING_LOCATION', 2, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_FLYING_LOCATION', 2, event);
-    }
-  });
-
-  dispatch.hook('S_USER_STATUS', 1, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_STATUS', 1, event);
-    }
-  });
-
-  dispatch.hook('S_USER_SITUATION', 1, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_SITUATION', 1, event);
-    }
-  });
-
-  dispatch.hook('S_USER_WEAPON_APPEARANCE_CHANGE', 1, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_WEAPON_APPEARANCE_CHANGE', 1, event);
-    }
-  });
-
-  dispatch.hook('S_USER_EFFECT', 1, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_USER_EFFECT', 1, event);
-    }
-  });
-
-  dispatch.hook('S_UNEQUIP_ITEM', 2, (event) =>
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_UNEQUIP_ITEM', 2, event);
-    }
+    return BasicRecordHook('S_LEAVE_PARTY', 3, event);
   });
 
   dispatch.hook('S_INSTANT_MOVE', 3, (event) =>
@@ -1181,14 +934,7 @@ module.exports = function TeraPlayer(dispatch)
         }
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_INSTANT_MOVE', 3, event);
-    }
+    return BasicRecordHook('S_INSTANT_MOVE', 3, event);
   });
 
   dispatch.hook('S_INSTANT_DASH', 3, (event) =>
@@ -1216,75 +962,23 @@ module.exports = function TeraPlayer(dispatch)
         }
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_INSTANT_DASH', 3, event);
-    }
-  });
-
-  dispatch.hook('S_ACTION_STAGE', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ACTION_STAGE', 1, event);
-    }
-  });
-
-  dispatch.hook('S_ACTION_END', 1, (event) => 
-  {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_ACTION_END', 1, event);
-    }
+    return BasicRecordHook('S_INSTANT_DASH', 3, event);
   });
 
   dispatch.hook('S_AERO', 1, (event) => 
   {
     me.world.aero = event;
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_AERO', 1, event);
-    }
+    return BasicRecordHook('S_AERO', 1, event);
   });
 
   dispatch.hook('S_MOUNT_VEHICLE', 2, (event) => 
   {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_MOUNT_VEHICLE', 2, event);
-    }
+    return BasicRecordHook('S_MOUNT_VEHICLE', 2, event);
   });
 
   dispatch.hook('S_UNMOUNT_VEHICLE', 2, (event) => 
   {
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_UNMOUNT_VEHICLE', 2, event);
-    }
+    return BasicRecordHook('S_UNMOUNT_VEHICLE', 2, event);
   });
 
   dispatch.hook('S_MOUNT_VEHICLE_EX', 1, (event) => 
@@ -1297,14 +991,7 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_MOUNT_VEHICLE_EX', 1, event);
-    }
+    return return BasicRecordHook('S_MOUNT_VEHICLE_EX', 1, event);
   });
 
   dispatch.hook('S_UNMOUNT_VEHICLE_EX', 1, (event) => 
@@ -1317,14 +1004,7 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-    if (me.locked)
-    {
-      return false;
-    }
-    if (Recording)
-    {
-      RecordEvent('S_UNMOUNT_VEHICLE_EX', 1, event);
-    }
+    return BasicRecordHook('S_UNMOUNT_VEHICLE_EX', 1, event);
   });
 
   dispatch.hook('S_INVEN', 'raw', (event) =>

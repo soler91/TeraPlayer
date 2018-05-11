@@ -14,7 +14,6 @@ module.exports =
     npcs : [],
     wobjs : [],
     colls : [],
-    abns : [],
     aero : null
   },
   tape : 
@@ -27,6 +26,7 @@ module.exports =
     startZone : 0,
     version : 0,
     protocol : 0,
+    login : null,
     world : null,
     data : []
   }

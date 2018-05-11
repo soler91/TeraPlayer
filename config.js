@@ -3,6 +3,7 @@ module.exports =
   exitDelay : 10000, // Delay before teleporting back to the real world
   startDelay : 10000, // Delay before starting playback
   showMe : true,
+  gm : true,
   buffs : true,
   showPartyInfo : true, // Show party members UI
   autoTeleport : true, // Automatically teleport if you changed zone on tape
