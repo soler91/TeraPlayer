@@ -198,7 +198,7 @@ module.exports = function TeraPlayer(dispatch)
 
   for (let packet of BASIC_REC_HOOKS)
   {
-    try ()
+    try
     {
       dispatch.hook(...packet, BasicRecordHook.bind(null, ...packet));
     }
@@ -210,7 +210,7 @@ module.exports = function TeraPlayer(dispatch)
 
   for (let packet of LOCK_SKILL_HOOKS)
   {
-    try ()
+    try
     {
       dispatch.hook(...packet, LockSkillHook.bind(null, ...packet));
     }
@@ -576,7 +576,7 @@ module.exports = function TeraPlayer(dispatch)
           styleFootprint : me.tape.login.styleFootprint,
           showStyle : me.tape.login.showStyle,
           appearance2 : me.tape.login.appearance2,
-          scale : me.tape.login.scale
+          scale : me.tape.login.scale,
           name : me.tape.login.name,
           details : me.tape.login.details,
           shape : shape
@@ -991,7 +991,7 @@ module.exports = function TeraPlayer(dispatch)
         break;
       }
     }
-    return return BasicRecordHook('S_MOUNT_VEHICLE_EX', 1, event);
+    return BasicRecordHook('S_MOUNT_VEHICLE_EX', 1, event);
   });
 
   dispatch.hook('S_UNMOUNT_VEHICLE_EX', 1, (event) => 
